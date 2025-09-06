@@ -1,7 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const path = require('path'); // Import the 'path' module
+const path = require('path');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 require('dotenv').config();
@@ -12,17 +12,23 @@ const PORT = process.env.PORT || 3000;
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-app.use(cors());
-const cache = new Map();
-
-// --- Static File Serving ---
-// This tells Express to serve your index.html from the 'public' directory.
-app.use(express.static(path.join(__dirname, 'public')));
+// --- CORS Configuration ---
+// This is the critical change. We now explicitly allow requests
+// from the frontend's live URL, which you will provide as an environment variable.
+const frontendUrl = process.env.FRONTEND_URL;
+app.use(cors({
+    origin: frontendUrl,
+}));
 // --------------------------
 
+const cache = new Map();
+
+// --- Static File Serving (No longer needed for two-repo setup) ---
+// app.use(express.static(path.join(__dirname, 'public')));
 
 // --- API Route ---
 app.get('/api/destinations', async (req, res) => {
+    // ... (rest of the API logic remains exactly the same)
     const budget = parseInt(req.query.budget, 10);
     const currency = req.query.currency || 'USD';
 
@@ -145,14 +151,6 @@ async function getSightsFromAI(locationName) {
         return ["Famous landmarks", "Local markets"];
     }
 }
-
-
-// --- Catch-all Route for Frontend ---
-// This ensures that any request that isn't for the API gets the index.html file.
-app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
 
 app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
