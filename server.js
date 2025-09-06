@@ -1,30 +1,31 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const path = require('path'); // Import the path module
+const path = require('path'); // Import the 'path' module
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-// This line loads the variables from your .env file into process.env
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Initialize Gemini AI Client and specify the flash model to be used for all tasks
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// Use CORS for the API route
-app.use('/api', cors());
-
-// A simple in-memory cache to avoid hitting API rate limits
+app.use(cors());
 const cache = new Map();
+
+// --- Static File Serving ---
+// This tells Express to serve your index.html and any other static files
+// from the 'public' directory. This is crucial for deployment.
+app.use(express.static(path.join(__dirname, 'public')));
+// --------------------------
+
 
 // --- AI-Powered Functions ---
 async function getAIRecommendations(budget, currency) {
     let convertedBudgetUSD = budget;
     let budgetContext = `The user's budget is ${budget} ${currency}.`;
-
     if (currency !== 'USD') {
         try {
             const exchangeResponse = await axios.get(`https://api.frankfurter.app/latest?from=${currency}&to=USD`);
@@ -35,33 +36,22 @@ async function getAIRecommendations(budget, currency) {
             console.error(`Failed to fetch exchange rate for ${currency}.`, error.message);
         }
     }
-
-    const prompt = `You are a highly realistic and practical travel expert. A user has a budget for a one-week trip. ${budgetContext}
-Your task is to suggest 5 travel destinations based on the following strict rules:
-
-1.  If the budget is extremely low and not feasible for any international travel (e.g., under 15000 INR or 200 USD), you MUST suggest 5 famous travel CITIES within that currency's home country.
-2.  If the budget is moderate (e.g., between 200 USD and 700 USD), suggest 5 budget-friendly CITIES, each from a different nearby or affordable country.
-3.  If the budget is high (e.g., over 700 USD), suggest 5 diverse COUNTRIES suitable for that budget.
-
+    const prompt = `You are a highly realistic travel expert. A user has a budget for a one-week trip. ${budgetContext}
+Based on these strict rules, suggest 5 travel destinations:
+1. If the budget is extremely low (under 200 USD), you MUST suggest 5 famous travel CITIES within that currency's home country.
+2. If the budget is moderate (between 200 USD and 700 USD), suggest 5 budget-friendly CITIES, each from a different nearby or affordable country.
+3. If the budget is high (over 700 USD), suggest 5 diverse COUNTRIES.
 IMPORTANT: For rules 2 and 3, ensure all 5 suggestions are from different countries.
-
-Provide your answer ONLY as a valid JSON array of objects. Each object must have a "name" and a "type" ('city' or 'country'). For cities, you MUST also include the "country" name.
-Do not add any other text, markdown, or explanations.`;
+Provide your answer ONLY as a valid JSON array of objects. Each object must have a "name" and a "type" ('city' or 'country'). For cities, you MUST also include "country".
+Do not add any other text.`;
 
     try {
-        console.log("Asking Gemini for realistic and diverse travel locations...");
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const text = response.text();
-
-        if (typeof text !== 'string') {
-            throw new Error("Received a non-text response from the AI model.");
-        }
-
+        if (typeof text !== 'string') throw new Error("Received a non-text response from AI.");
         const cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-        const locationList = JSON.parse(cleanedText);
-        console.log("Gemini suggested locations:", locationList);
-        return locationList;
+        return JSON.parse(cleanedText);
     } catch (error) {
         console.error("Error calling Gemini API for locations:", error);
         return [];
@@ -69,24 +59,17 @@ Do not add any other text, markdown, or explanations.`;
 }
 
 async function getSightsFromAI(locationName) {
-    const prompt = `Suggest the 3 most famous tourist attractions in ${locationName}. Provide your answer ONLY as a valid JSON array of strings. Example: ["Eiffel Tower", "Louvre Museum", "Notre-Dame Cathedral"]. Do not add any other text.`;
-    
+    const prompt = `Suggest the 3 most famous tourist attractions in ${locationName}. Provide your answer ONLY as a valid JSON array of strings. Example: ["Eiffel Tower", "Louvre Museum"]. Do not add any other text.`;
     try {
-        console.log(`Asking Gemini for sights in ${locationName}...`);
         const result = await model.generateContent(prompt);
         const response = await result.response;
         const text = response.text();
-
-        if (typeof text !== 'string') {
-            throw new Error("Received a non-text response from the AI model for sights.");
-        }
-
+        if (typeof text !== 'string') throw new Error("Received a non-text response from AI for sights.");
         const cleanedText = text.replace(/```json/g, '').replace(/```/g, '').trim();
-        const sights = JSON.parse(cleanedText);
-        return sights;
+        return JSON.parse(cleanedText);
     } catch (error) {
         console.error(`Error calling Gemini API for sights in ${locationName}:`, error);
-        return ["Famous landmarks", "Local markets", "Beautiful parks"];
+        return ["Famous landmarks", "Local markets"];
     }
 }
 
@@ -96,43 +79,40 @@ app.get('/api/destinations', async (req, res) => {
     const currency = req.query.currency || 'USD';
 
     if (isNaN(budget)) {
-        return res.status(400).json({ error: 'A valid budget parameter is required.' });
+        return res.status(400).json({ error: 'A valid budget is required.' });
     }
 
-    const cacheKey = `destinations-v5-${budget}-${currency}`;
+    const cacheKey = `destinations-v6-${budget}-${currency}`;
     if (cache.has(cacheKey) && (Date.now() - cache.get(cacheKey).timestamp < 3600000)) {
         console.log(`Serving from cache for ${budget} ${currency}`);
         return res.json(cache.get(cacheKey).data);
     }
 
-    console.log(`Fetching new AI suggestions for budget ${budget} ${currency}`);
-
     try {
         const suggestedLocations = await getAIRecommendations(budget, currency);
         if (!suggestedLocations || suggestedLocations.length === 0) {
-            throw new Error("AI did not return any location suggestions.");
+            throw new Error("AI did not return any suggestions.");
         }
 
         const destinations = [];
         for (const location of suggestedLocations) {
             try {
-                // Added a 10-second timeout to each API call to prevent getting stuck
-                const timeout = 10000;
                 const isCity = location.type === 'city';
                 const countryName = isCity ? location.country : location.name;
                 const locationName = location.name;
 
-                const countryResponse = await axios.get(`https://restcountries.com/v3.1/name/${countryName.trim()}?fullText=true`, { timeout });
+                const countryPromise = axios.get(`https://restcountries.com/v3.1/name/${countryName.trim()}?fullText=true`, { timeout: 10000 });
+                const countryResponse = await countryPromise;
                 const country = countryResponse.data[0];
                 if (!country) continue;
 
                 let latlng, displayName, subtext;
-
                 if (isCity) {
-                    const geocodeResponse = await axios.get(`https://api.openweathermap.org/geo/1.0/direct`, {
+                    const geocodePromise = axios.get(`https://api.openweathermap.org/geo/1.0/direct`, {
                         params: { q: `${locationName},${country.cca2}`, limit: 1, appid: process.env.OPENWEATHER_API_KEY },
-                        timeout
+                        timeout: 10000
                     });
+                    const geocodeResponse = await geocodePromise;
                     if (geocodeResponse.data && geocodeResponse.data.length > 0) {
                         latlng = [geocodeResponse.data[0].lat, geocodeResponse.data[0].lon];
                     } else { continue; }
@@ -147,18 +127,19 @@ app.get('/api/destinations', async (req, res) => {
 
                 const weatherPromise = axios.get(`https://api.openweathermap.org/data/2.5/weather`, {
                     params: { q: displayName, appid: process.env.OPENWEATHER_API_KEY, units: 'metric' },
-                    timeout
+                    timeout: 10000
                 });
-                
                 const attractionsPromise = getSightsFromAI(locationName);
-
                 const [weatherResponse, attractions] = await Promise.all([weatherPromise, attractionsPromise]);
-                
+
+                // Added a safety check for currency data to prevent crashes
+                const currencyData = country.currencies ? Object.values(country.currencies)[0] : null;
+
                 destinations.push({
                     name: locationName,
                     capital: subtext,
                     flag: country.flags.svg,
-                    currency: Object.values(country.currencies)[0].name,
+                    currency: currencyData ? currencyData.name : 'N/A',
                     latlng: latlng,
                     weather: {
                         temp: weatherResponse.data.main.temp,
@@ -166,40 +147,26 @@ app.get('/api/destinations', async (req, res) => {
                     },
                     attractions: attractions,
                 });
-
             } catch (error) {
                 console.error(`Failed to fetch full data for ${location.name}:`, error.message);
             }
         }
-        
         cache.set(cacheKey, { timestamp: Date.now(), data: destinations });
         res.json(destinations);
-
     } catch (error) {
-        console.error("Major error in API orchestration:", error.message);
-        res.status(500).json({ error: 'Failed to fetch external API data. Check server logs and API keys.' });
+        console.error("Major error in API orchestration:", error);
+        res.status(500).json({ error: 'Failed to fetch API data.' });
     }
 });
 
-
-// --- Serve Frontend ---
-// This part is crucial for fixing the "Cannot GET /" error
-const frontendDirPath = path.join(__dirname, '..', 'FRONTEND');
-app.use(express.static(frontendDirPath));
-
+// --- Catch-all Route for Frontend ---
+// This makes sure that any request that isn't for the API gets the index.html file.
 app.get('*', (req, res) => {
-    res.sendFile(path.join(frontendDirPath, 'index.html'));
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 
-// --- Start Server ---
 app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
-    if (!process.env.GEMINI_API_KEY) {
-        console.warn("\x1b[33m%s\x1b[0m", "Warning: GEMINI_API_KEY is missing from .env file.");
-    }
-    if (!process.env.OPENWEATHER_API_KEY) {
-        console.warn("\x1b[33m%s\x1b[0m", "Warning: OPENWEATHER_API_KEY is missing.");
-    }
 });
 
